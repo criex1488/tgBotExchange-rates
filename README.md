@@ -29,5 +29,5 @@
 
 1. Клонируйте репозиторий:
    `bash
-   git clone https://github.com/ваш-логин/currency-exchange-bot.git
+   git clone https://github.com/criex1488/tgBotExchange-rates.git
    cd currency-exchange-bot
