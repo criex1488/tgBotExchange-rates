@@ -2,3 +2,4 @@ aiogram==2.25.1
 requests==2.31.0
 babel==2.16.0
 aiohttp==3.11.11
+certifi==2024.12.14
