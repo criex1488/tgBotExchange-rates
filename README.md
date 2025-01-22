@@ -34,3 +34,7 @@
    `bash
    git clone https://github.com/criex1488/tgBotExchange-rates.git
    cd currency-exchange-bot
+
+## Попробовать бота
+
+@tg_currency_exchange_bot
