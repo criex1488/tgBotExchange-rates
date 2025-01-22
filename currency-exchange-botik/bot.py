@@ -1,26 +1,47 @@
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+import requests
 
-API_TOKEN = "YOUR_TELEGRAM_BOT_API_KEY"
+API_TOKEN = "tg_token"
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
 @dp.message_handler(commands=["start"])
 async def start_command(message: types.Message):
-    # клава с валютами
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    buttons = ["USD", "EUR", "JPY", "TRY", "RUB"]
+    buttons = ["USD", "EUR", "JPY", "TRY", "RUB", "Узнать курс валют"]
     keyboard.add(*buttons)
     
-    await message.answer("Добро пожаловать! Выберите валюту:", reply_markup=keyboard)
+    await message.answer("Добро пожаловать! Я—бот для курса валют. Выбери в кнопках интересующую валюту.", reply_markup=keyboard)
 
-# выбор валюты
 @dp.message_handler(lambda message: message.text in ["USD", "EUR", "JPY", "TRY", "RUB"])
 async def currency_selected(message: types.Message):
     selected_currency = message.text
     await message.reply(f"Вы выбрали {selected_currency}. Введите сумму для конвертации:")
+
+@dp.message_handler(lambda message: message.text == "Узнать курс валют")
+async def ask_for_amount(message: types.Message):
+    await message.reply("Введите сумму для получения актуального курса валют:")
+
+@dp.message_handler(lambda message: message.text.isdigit())
+async def get_exchange_rates(message: types.Message):
+    amount = float(message.text)
+    # Получение курса
+    response = requests.get("https://api.exchangerate-api.com/v4/latest/USD")
+    data = response.json()
+    
+    # ответ с курсами
+    rates = {}
+    for currency in ["USD", "EUR", "JPY", "TRY", "RUB"]:
+        rates[currency] = data['rates'][currency] * amount
+
+    rates_message = "Актуальный курс валют на текущий период:\n"
+    for currency, converted_amount in rates.items():
+        rates_message += f"«{currency}» - «{converted_amount:.2f}»\n"
+    
+    await message.reply(rates_message)
 
 # запуск
 if __name__ == "__main__":
