@@ -52,3 +52,20 @@
 ## **📥 Установка**
 
 1. Клонируйте репозиторий:
+   
+   git clone https://github.com/criex1488/tgBotExchange-rates.git
+   cd tgBotExchange-rates
+  
+
+2. Установите зависимости:
+   
+   pip install -r requirements.txt
+  
+
+3. Запустите бота:
+   
+   python bot.py
+  
+
+## **🚀 Попробовать бота**
+[**@tg_currency_exchange_bot**](https://t.me/tg_currency_exchange_bot)
