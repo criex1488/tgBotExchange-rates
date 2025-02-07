@@ -92,18 +92,27 @@ def is_number(text: str) -> bool:
     except ValueError:
         return False
 
-@dp.message_handler(lambda message: (
-    message.from_user.id in user_data and 
-    "from_currency" in user_data[message.from_user.id] and 
-    "amount" not in user_data[message.from_user.id] and 
-    is_number(message.text)
-))
+@dp.message_handler(lambda message: message.from_user.id in user_data 
+                    and "from_currency" in user_data[message.from_user.id] 
+                    and "amount" not in user_data[message.from_user.id])
 async def amount_selected(message: Message):
+    # Заменяем запятую на точку для единообразия
+    t = message.text.replace(',', '.')
     try:
-        amount = float(message.text.replace(',', '.'))
+        # Пробуем преобразовать в число
+        float(t)
     except ValueError:
         await message.reply("❌ Неверный формат суммы!", reply_markup=main_keyboard())
         return
+
+    # Если есть десятичная точка, проверяем число цифр после неё
+    if '.' in t:
+        _, fraction = t.split('.', 1)
+        if len(fraction) > 2:
+            await message.reply("❌ Слишком много цифр после десятичной точки. Максимум 2 цифры допустимо.", reply_markup=main_keyboard())
+            return
+
+    amount = float(t)
     if amount <= 0:
         user_data.pop(message.from_user.id, None)
         await message.reply("❌ Сумма должна быть положительной!", reply_markup=main_keyboard())
@@ -116,12 +125,13 @@ async def amount_selected(message: Message):
         user_data.pop(message.from_user.id, None)
         await message.reply("❌ Слишком большая сумма. Введите сумму меньше 1,000,000,000.", reply_markup=main_keyboard())
         return
+
     user_data[message.from_user.id]["amount"] = amount
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
     buttons = ["USD", "EUR", "JPY", "TRY", "RUB"]
     keyboard.add(*buttons)
     await message.reply("Теперь выберите валюту, в которую хотите конвертировать:", reply_markup=keyboard)
-
+    
 async def convert_currency(message: Message):
     from_currency = user_data[message.from_user.id]["from_currency"]
     to_currency = user_data[message.from_user.id]["to_currency"]
@@ -317,7 +327,7 @@ async def daily_exchange_rates():
 
 async def check_alerts():
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(5)
         rates = get_exchange_rates()
         if not rates:
             continue
