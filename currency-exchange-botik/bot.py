@@ -6,17 +6,13 @@ from io import BytesIO
 
 import matplotlib.pyplot as plt
 import numpy as np
+import requests  # добавили для HTTP-запросов
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import Message, ReplyKeyboardMarkup
 from aiogram.utils import executor
 from aiogram.dispatcher.middlewares import BaseMiddleware
 from aiogram.dispatcher.handler import CancelHandler
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 # ===== Конфигурация =====
 API_TOKEN = "tgtoken"
@@ -43,7 +39,6 @@ class ThrottlingMiddleware(BaseMiddleware):
                 logging.error(f"Ошибка отправки уведомления: {e}")
             raise CancelHandler()
         dp.storage.data[user_id] = current
-
 
 dp.storage.data = {}
 dp.middleware.setup(ThrottlingMiddleware(limit=1))
@@ -147,8 +142,7 @@ async def convert_currency(message: Message):
 
 def get_exchange_rates():
     try:
-        import requests
-        response = requests.get(CBR_API_URL)
+        response = requests.get(CBR_API_URL, timeout=10)
         response.raise_for_status()
         data = response.json()
         rates = {
@@ -164,16 +158,11 @@ def get_exchange_rates():
         return None
 
 # ===== График курса (USD к RUB) с защитой от спама =====
-# Для защиты от спама для команды "График курса" используем отдельные словари:
-graph_currency_lock = {}         # Для каждого пользователя: объект asyncio.Lock
-graph_currency_last_time = {}      # Время последнего запроса по user_id
-GRAPH_CURRENCY_COOLDOWN = 30       # Интервал в секундах между запросами от одного пользователя
+graph_currency_lock = {}
+graph_currency_last_time = {}
+GRAPH_CURRENCY_COOLDOWN = 30
 
 def generate_currency_graph():
-    """
-    Функция выполняет запросы к API ЦБ и строит график курса USD к RUB за последние 7 дней.
-    Возвращает изображение графика в виде байтов.
-    """
     currency = "USD"
     today = datetime.date.today()
     dates = []
@@ -183,8 +172,7 @@ def generate_currency_graph():
         date_str = date.strftime("%Y/%m/%d")
         url = f"https://www.cbr-xml-daily.ru/archive/{date_str}/daily_json.js"
         try:
-            import requests
-            response = requests.get(url)
+            response = requests.get(url, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if currency in data["Valute"]:
@@ -214,18 +202,15 @@ async def send_currency_graph(message: Message):
     user_id = message.from_user.id
     current_time = asyncio.get_event_loop().time()
 
-    # Если пользователь отправил запрос слишком недавно, отказываем
     if user_id in graph_currency_last_time and (current_time - graph_currency_last_time[user_id] < GRAPH_CURRENCY_COOLDOWN):
         await message.reply("Слишком быстро отправляете запросы. Пожалуйста, подождите немного.")
         return
     graph_currency_last_time[user_id] = current_time
 
-    # Если для пользователя ещё нет lock – создаём его
     if user_id not in graph_currency_lock:
         graph_currency_lock[user_id] = asyncio.Lock()
     lock = graph_currency_lock[user_id]
 
-    # Если уже идёт обработка запроса, сразу сообщаем об этом
     if lock.locked():
         await message.reply("Ваш запрос уже в обработке. Пожалуйста, подождите.")
         return
@@ -233,7 +218,6 @@ async def send_currency_graph(message: Message):
     async with lock:
         try:
             loop = asyncio.get_event_loop()
-            # Выполняем тяжёлую операцию в пуле потоков
             image_bytes = await loop.run_in_executor(None, generate_currency_graph)
         except Exception as e:
             logging.error(f"Ошибка генерации графика: {e}")
@@ -369,10 +353,10 @@ best_rates_cache = {
 }
 CACHE_DURATION = 300  # 5 минут
 
-def get_best_exchange_rates_selenium(force_update: bool = False):
+def get_best_exchange_rates(force_update: bool = False):
     """
     Если force_update==False, то если данные в кэше не устарели, возвращаем их.
-    Иначе запускаем Selenium и обновляем кэш.
+    Иначе выполняем HTTP-запрос с помощью requests и обновляем кэш.
     """
     global best_rates_cache
     current_time = time.time()
@@ -381,25 +365,17 @@ def get_best_exchange_rates_selenium(force_update: bool = False):
         logging.info("Используем закэшированные данные для обменников.")
         return best_rates_cache["data"]
 
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    driver = webdriver.Chrome(options=chrome_options)
-    
-    driver.get(BANKI_URL)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+    }
     try:
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div[data-test='currency__rates-form__result-item']"))
-        )
+        response = requests.get(BANKI_URL, headers=headers, timeout=10)
+        response.raise_for_status()
     except Exception as e:
-        logging.error(f"Timeout или ошибка ожидания: {e}")
-        driver.quit()
+        logging.error(f"Ошибка получения данных с banki.ru: {e}")
         return []
-    
-    html = driver.page_source
-    driver.quit()
 
+    html = response.text
     soup = BeautifulSoup(html, 'html.parser')
     banks = []
     items = soup.find_all('div', {'data-test': 'currency__rates-form__result-item'})
@@ -431,7 +407,6 @@ def get_best_exchange_rates_selenium(force_update: bool = False):
 
         refresh_elem = item.find('div', {'data-test': 'currency--result-item--refresh-date'})
         refresh_text = refresh_elem.text.strip() if refresh_elem else ""
-
         banks.append((name, buy, sell, refresh_text))
     
     best_rates_cache["timestamp"] = current_time
@@ -446,16 +421,15 @@ async def best_rates_cache_refresher():
     while True:
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, lambda: get_best_exchange_rates_selenium(force_update=True))
+            await loop.run_in_executor(None, lambda: get_best_exchange_rates(force_update=True))
         except Exception as e:
             logging.error(f"Ошибка обновления кэша лучших обменников: {e}")
         await asyncio.sleep(CACHE_DURATION)
 
 # ===== Защита от спама для команды "Лучшие обменники" =====
-# (аналогично "График курса" – для каждого пользователя разрешаем один запрос за заданный интервал)
-graph_generation_lock = {}         # Для каждого пользователя: объект asyncio.Lock
-graph_generation_last_time = {}      # Время последнего запроса по user_id
-GRAPH_GENERATION_COOLDOWN = 30       # Интервал в секундах между запросами
+graph_generation_lock = {}
+graph_generation_last_time = {}
+GRAPH_GENERATION_COOLDOWN = 30
 
 def generate_chart(banks):
     """
@@ -521,7 +495,7 @@ async def best_rates_handler(message: Message):
     async with lock:
         if best_rates_cache["data"] is None:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: get_best_exchange_rates_selenium(force_update=True))
+            await loop.run_in_executor(None, lambda: get_best_exchange_rates(force_update=True))
         
         banks = best_rates_cache["data"]
         if not banks:
@@ -537,7 +511,7 @@ async def best_rates_handler(message: Message):
 async def on_startup(_):
     loop = asyncio.get_event_loop()
     # Предзагружаем кэш лучших обменников
-    await loop.run_in_executor(None, lambda: get_best_exchange_rates_selenium(force_update=True))
+    await loop.run_in_executor(None, lambda: get_best_exchange_rates(force_update=True))
     # Запускаем фоновые таски
     asyncio.create_task(best_rates_cache_refresher())
     asyncio.create_task(daily_exchange_rates())
