@@ -6,7 +6,7 @@ from io import BytesIO
 
 import matplotlib.pyplot as plt
 import numpy as np
-import requests  # добавили для HTTP-запросов
+import requests  # для HTTP-запросов
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import Message, ReplyKeyboardMarkup
 from aiogram.utils import executor
@@ -17,7 +17,9 @@ from bs4 import BeautifulSoup
 # ===== Конфигурация =====
 API_TOKEN = "tgtoken"
 CBR_API_URL = "https://www.cbr-xml-daily.ru/daily_json.js"
-BANKI_URL = "https://www.banki.ru/products/currency/cash/izhevsk/"
+# Новый API для получения обменников (сортировка по покупке по возрастанию)
+BANKI_API_URL = ("https://www.banki.ru/products/currencyNodejsApi/getBanksOrExchanges/"
+                 "?sortAttribute=buy&order=asc&regionUrl=izhevsk&currencyId=840&amount=&page=1&pagePath=currencyCashCity")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
@@ -54,7 +56,7 @@ logging.basicConfig(level=logging.INFO)
 def main_keyboard():
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
     buttons = [
-        "USD", "EUR", "JPY", "TRY", "RUB",
+        "USD", "EUR", "JPY", "TRY", "RUB", "AED",
         "📊 Подписаться", "❌ Отписаться",
         "🔔 Установить будильник", "📉 График курса",
         "📊 Лучшие обменники в Ижевске",
@@ -70,11 +72,12 @@ async def start_command(message: Message):
     await message.answer("👋 Добро пожаловать! Выберите действие:", reply_markup=main_keyboard())
 
 # ===== Конвертация валют =====
-@dp.message_handler(lambda message: message.text in ["USD", "EUR", "JPY", "TRY", "RUB"])
+@dp.message_handler(lambda message: message.text in ["USD", "EUR", "JPY", "TRY", "RUB", "AED"])
 async def currency_selected(message: Message):
     user_id = message.from_user.id
     if user_id not in user_data:
         user_data[user_id] = {}
+    # Если уже введена сумма, проверяем, чтобы выбранная валюта не совпадала с исходной
     if "amount" in user_data[user_id]:
         if user_data[user_id].get("from_currency") == message.text:
             await message.reply("❌ Валюта для конвертации должна отличаться от исходной. Выберите другую валюту:")
@@ -96,16 +99,13 @@ def is_number(text: str) -> bool:
                     and "from_currency" in user_data[message.from_user.id] 
                     and "amount" not in user_data[message.from_user.id])
 async def amount_selected(message: Message):
-    # Заменяем запятую на точку для единообразия
     t = message.text.replace(',', '.')
     try:
-        # Пробуем преобразовать в число
         float(t)
     except ValueError:
         await message.reply("❌ Неверный формат суммы!", reply_markup=main_keyboard())
         return
 
-    # Если есть десятичная точка, проверяем число цифр после неё
     if '.' in t:
         _, fraction = t.split('.', 1)
         if len(fraction) > 2:
@@ -127,11 +127,12 @@ async def amount_selected(message: Message):
         return
 
     user_data[message.from_user.id]["amount"] = amount
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    buttons = ["USD", "EUR", "JPY", "TRY", "RUB"]
+    # Клавиатура с выбором валют с параметром one_time_keyboard для удобства на телефонах
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    buttons = ["USD", "EUR", "JPY", "TRY", "RUB", "AED"]
     keyboard.add(*buttons)
-    await message.reply("Теперь выберите валюту, в которую хотите конвертировать:", reply_markup=keyboard)
-    
+    await message.answer("Теперь выберите валюту, в которую хотите конвертировать:", reply_markup=keyboard)
+
 async def convert_currency(message: Message):
     from_currency = user_data[message.from_user.id]["from_currency"]
     to_currency = user_data[message.from_user.id]["to_currency"]
@@ -140,6 +141,12 @@ async def convert_currency(message: Message):
     rates = get_exchange_rates()
     if not rates:
         await message.reply("❌ Ошибка при получении данных.", reply_markup=main_keyboard())
+        return
+
+    # Проверяем наличие курса для выбранной валюты (например, AED может отсутствовать)
+    if rates.get(from_currency) is None or rates.get(to_currency) is None:
+        await message.reply("❌ Не удалось получить курс для выбранной валюты.", reply_markup=main_keyboard())
+        user_data.pop(message.from_user.id, None)
         return
 
     result = (amount * rates[from_currency]) / rates[to_currency]
@@ -155,12 +162,14 @@ def get_exchange_rates():
         response = requests.get(CBR_API_URL, timeout=10)
         response.raise_for_status()
         data = response.json()
+        # Добавляем AED, если он присутствует в ответе
         rates = {
             "USD": data["Valute"]["USD"]["Value"],
             "EUR": data["Valute"]["EUR"]["Value"],
             "JPY": data["Valute"]["JPY"]["Value"] / 100,
             "TRY": data["Valute"]["TRY"]["Value"],
-            "RUB": 1.0
+            "RUB": 1.0,
+            "AED": data["Valute"]["AED"]["Value"] if "AED" in data["Valute"] else None
         }
         return rates
     except Exception as e:
@@ -258,7 +267,7 @@ async def set_alert(message: Message):
         await message.reply("❌ Неправильный формат! Используйте: `/alert USD 100.50`", reply_markup=main_keyboard())
         return
     currency = parts[1].upper()
-    allowed_currencies = ["USD", "EUR", "JPY", "TRY", "RUB"]
+    allowed_currencies = ["USD", "EUR", "JPY", "TRY", "RUB", "AED"]
     if currency not in allowed_currencies:
         await message.reply(f"❌ Валюта {currency} не поддерживается. Доступны: {', '.join(allowed_currencies)}", reply_markup=main_keyboard())
         return
@@ -318,7 +327,7 @@ async def daily_exchange_rates():
         await asyncio.sleep(86400)
         rates = get_exchange_rates()
         if subscribers and rates:
-            text = "📊 **Курсы валют на сегодня:**\n" + "\n".join(f"💰 {c}: {v:.2f} RUB" for c, v in rates.items())
+            text = "📊 **Курсы валют на сегодня:**\n" + "\n".join(f"💰 {c}: {v:.2f} RUB" for c, v in rates.items() if v is not None)
             for user_id in subscribers:
                 try:
                     await bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=main_keyboard())
@@ -366,7 +375,7 @@ CACHE_DURATION = 300  # 5 минут
 def get_best_exchange_rates(force_update: bool = False):
     """
     Если force_update==False, то если данные в кэше не устарели, возвращаем их.
-    Иначе выполняем HTTP-запрос с помощью requests и обновляем кэш.
+    Иначе выполняем HTTP-запрос к новому API и обновляем кэш.
     """
     global best_rates_cache
     current_time = time.time()
@@ -375,54 +384,48 @@ def get_best_exchange_rates(force_update: bool = False):
         logging.info("Используем закэшированные данные для обменников.")
         return best_rates_cache["data"]
 
+    # Заголовки запроса. Важно передать полный набор, включая cookies.
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "accept": "application/json, text/plain, */*",
+        "accept-language": "ru,en;q=0.9",
+        "cookie": "_flpt_percent_zone=10; _flpt_sso_auth_user_in_segment=off; _gcl_au=1.1.1558551762.1737809557; _ga=GA1.2.840259073.1737809558; non_auth_user_region_id=508; uxs_uid=fceb3e50-db1b-11ef-8910-6fed71a169ad; __lhash_=03e5c24c899eb1ff0e109d0c2e4c764d; gtm-session-start=1739019645006; _gid=GA1.2.1108255462.1739019648; __hash_=e53d727ad88b20e2078fb1da6b19e342; _gat=1; banki_prev_page=/products/currencyNodejsApi/getBanksOrExchanges/; BANKI_RU_MYBANKI_ID=4895db1c-7df1-46d1-8fd2-6f4ddb5a3db2; _banki_ru_mybanki_id_migration=2024-08-14-updatedCookieDomain; counter_session=3; aff_sub3=/products/currency/cash/izhevsk/",
+        "referer": "https://www.banki.ru/products/currency/cash/izhevsk/",
+        "x-requested-with": "XMLHttpRequest"
     }
     try:
-        response = requests.get(BANKI_URL, headers=headers, timeout=10)
+        response = requests.get(BANKI_API_URL, headers=headers, timeout=10)
         response.raise_for_status()
+        data = response.json()
+        banks_list = data.get("list", [])
+        banks = []
+        for bank in banks_list:
+            name = bank.get("name", "Неизвестный банк")
+            exchange = bank.get("exchange", {})
+            buy = exchange.get("buy", 0)
+            sale = exchange.get("sale", 0)
+            refresh_date = exchange.get("refreshDate", "")
+            banks.append((name, buy, sale, refresh_date))
     except Exception as e:
         logging.error(f"Ошибка получения данных с banki.ru: {e}")
-        return []
+        banks = []
 
-    html = response.text
-    soup = BeautifulSoup(html, 'html.parser')
-    banks = []
-    items = soup.find_all('div', {'data-test': 'currency__rates-form__result-item'})
-    logging.info(f"Найдено элементов с курсами: {len(items)}")
-    for item in items:
-        name_elem = item.find('div', {'data-test': 'currenct--result-item--name'})
-        if not name_elem:
-            continue
-        name = name_elem.text.strip()
-
-        buy_elem = item.find('div', {'data-test': 'currency--result-item---rate-buy'})
-        sell_elem = item.find('div', {'data-test': 'currency--result-item---rate-sell'})
-        if not (buy_elem and sell_elem):
-            continue
-
-        buy_divs = buy_elem.find_all('div')
-        sell_divs = sell_elem.find_all('div')
-        if not (buy_divs and sell_divs):
-            continue
-
-        try:
-            buy_str = buy_divs[-1].text.strip().replace('₽', '').replace(',', '.')
-            sell_str = sell_divs[-1].text.strip().replace('₽', '').replace(',', '.')
-            buy = float(buy_str)
-            sell = float(sell_str)
-        except Exception as e:
-            logging.error(f"Ошибка парсинга курсов для банка {name}: {e}")
-            continue
-
-        refresh_elem = item.find('div', {'data-test': 'currency--result-item--refresh-date'})
-        refresh_text = refresh_elem.text.strip() if refresh_elem else ""
-        banks.append((name, buy, sell, refresh_text))
-    
     best_rates_cache["timestamp"] = current_time
-    best_rates_cache["data"] = sorted(banks, key=lambda x: x[1], reverse=True)
+    best_rates_cache["data"] = banks
     logging.info("Данные лучших обменников обновлены и сохранены в кэш.")
-    return best_rates_cache["data"]
+    return banks
+
+def generate_best_rates_text(banks):
+    """
+    Формирует отформатированное текстовое сообщение со списком лучших обменников.
+    """
+    lines = ["📊 *Лучшие обменники в Ижевске (USD):*\n"]
+    for i, (name, buy, sale, refresh_date) in enumerate(banks[:10], start=1):
+        lines.append(f"*{i}. {name}*")
+        lines.append(f"  🔹 Покупка: *{buy}₽*")
+        lines.append(f"  🔸 Продажа: *{sale}₽*")
+        lines.append(f"  ⏰ Обновлено: `{refresh_date}`\n")
+    return "\n".join(lines)
 
 async def best_rates_cache_refresher():
     """
@@ -437,51 +440,9 @@ async def best_rates_cache_refresher():
         await asyncio.sleep(CACHE_DURATION)
 
 # ===== Защита от спама для команды "Лучшие обменники" =====
-graph_generation_lock = {}
-graph_generation_last_time = {}
-GRAPH_GENERATION_COOLDOWN = 30
-
-def generate_chart(banks):
-    """
-    Генерирует график лучших обменников с использованием Matplotlib и возвращает изображение в виде байтов.
-    """
-    names = [bank[0] for bank in banks]
-    buy_rates = [bank[1] for bank in banks]
-    sell_rates = [bank[2] for bank in banks]
-    refresh_texts = [bank[3] for bank in banks]
-
-    y = np.arange(len(names))
-    width = 0.4  # Ширина столбцов
-
-    plt.figure(figsize=(12, 6))
-    plt.barh(y - width/2, buy_rates, width, color='green', label='Покупка')
-    plt.barh(y + width/2, sell_rates, width, color='red', label='Продажа')
-
-    plt.yticks(y, names)
-    plt.xlabel('Курс (₽)')
-    plt.ylabel('Банки')
-    plt.title('Лучшие курсы обмена в Ижевске')
-    plt.legend()
-    plt.grid(axis='x')
-
-    for i, (buy, sell, refresh) in enumerate(zip(buy_rates, sell_rates, refresh_texts)):
-        plt.text(buy + 0.5, i - width/2, f'{buy:.2f}₽', va='center', fontsize=10, color='black')
-        plt.text(sell + 0.5, i + width/2, f'{sell:.2f}₽', va='center', fontsize=10, color='black')
-        if refresh:
-            if buy >= sell:
-                x_center = buy / 2
-                y_center = i - width/2
-            else:
-                x_center = sell / 2
-                y_center = i + width/2
-            plt.text(x_center, y_center, refresh, va='center', ha='center', fontsize=8, 
-                     color='white', weight='bold')
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    plt.close()
-    return buf.getvalue()
+best_rates_lock = {}
+best_rates_last_time = {}
+BEST_RATES_COOLDOWN = 30
 
 @dp.message_handler(commands=['best_rates'])
 @dp.message_handler(lambda message: message.text == "📊 Лучшие обменники в Ижевске")
@@ -489,14 +450,14 @@ async def best_rates_handler(message: Message):
     user_id = message.from_user.id
     current_time = asyncio.get_event_loop().time()
 
-    if user_id in graph_generation_last_time and (current_time - graph_generation_last_time[user_id] < GRAPH_GENERATION_COOLDOWN):
+    if user_id in best_rates_last_time and (current_time - best_rates_last_time[user_id] < BEST_RATES_COOLDOWN):
         await message.reply("Слишком быстро отправляете запросы. Пожалуйста, подождите немного.")
         return
-    graph_generation_last_time[user_id] = current_time
+    best_rates_last_time[user_id] = current_time
 
-    if user_id not in graph_generation_lock:
-        graph_generation_lock[user_id] = asyncio.Lock()
-    lock = graph_generation_lock[user_id]
+    if user_id not in best_rates_lock:
+        best_rates_lock[user_id] = asyncio.Lock()
+    lock = best_rates_lock[user_id]
 
     if lock.locked():
         await message.reply("Ваш запрос уже в обработке. Пожалуйста, подождите.")
@@ -512,10 +473,9 @@ async def best_rates_handler(message: Message):
             await message.reply("Не удалось получить данные о курсах валют.", reply_markup=main_keyboard())
             return
 
-        banks = banks[:10]  # Берем топ-10
-        loop = asyncio.get_event_loop()
-        image_bytes = await loop.run_in_executor(None, generate_chart, banks)
-        await message.reply_photo(image_bytes, reply_markup=main_keyboard())
+        # Здесь генерируется текст с Markdown-разметкой:
+        text = generate_best_rates_text(banks)
+        await message.reply(text, parse_mode="Markdown", reply_markup=main_keyboard())
 
 # ===== on_startup: предзагрузка кэша и запуск фоновых задач =====
 async def on_startup(_):
