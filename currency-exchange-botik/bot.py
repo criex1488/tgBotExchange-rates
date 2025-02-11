@@ -14,7 +14,7 @@ from aiogram.dispatcher.handler import CancelHandler
 from bs4 import BeautifulSoup
 
 # ===== Конфигурация =====
-API_TOKEN = "tokentg"
+API_TOKEN = "TGOKEN"
 CBR_API_URL = "https://www.cbr-xml-daily.ru/daily_json.js"
 # Новый API для получения обменников (сортировка по покупке по возрастанию)
 BANKI_API_URL = ("https://www.banki.ru/products/currencyNodejsApi/getBanksOrExchanges/"
