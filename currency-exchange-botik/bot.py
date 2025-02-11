@@ -5,7 +5,6 @@ import time
 from io import BytesIO
 
 import matplotlib.pyplot as plt
-import numpy as np
 import requests  # для HTTP-запросов
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import Message, ReplyKeyboardMarkup
@@ -15,7 +14,7 @@ from aiogram.dispatcher.handler import CancelHandler
 from bs4 import BeautifulSoup
 
 # ===== Конфигурация =====
-API_TOKEN = "tgtoken"
+API_TOKEN = "tokentg"
 CBR_API_URL = "https://www.cbr-xml-daily.ru/daily_json.js"
 # Новый API для получения обменников (сортировка по покупке по возрастанию)
 BANKI_API_URL = ("https://www.banki.ru/products/currencyNodejsApi/getBanksOrExchanges/"
@@ -83,7 +82,7 @@ async def currency_selected(message: Message):
             await message.reply("❌ Валюта для конвертации должна отличаться от исходной. Выберите другую валюту:")
             return
         user_data[user_id]["to_currency"] = message.text
-        await convert_currency(message)
+        await convert_currency(user_id, message)
     else:
         user_data[user_id]["from_currency"] = message.text
         await message.reply(f"Вы выбрали {message.text}. Введите сумму для конвертации:")
@@ -95,6 +94,7 @@ def is_number(text: str) -> bool:
     except ValueError:
         return False
 
+# ===== Обработчик ввода суммы с последующим показом инлайн-клавиатуры для выбора целевой валюты =====
 @dp.message_handler(lambda message: message.from_user.id in user_data 
                     and "from_currency" in user_data[message.from_user.id] 
                     and "amount" not in user_data[message.from_user.id])
@@ -127,16 +127,45 @@ async def amount_selected(message: Message):
         return
 
     user_data[message.from_user.id]["amount"] = amount
-    # Клавиатура с выбором валют с параметром one_time_keyboard для удобства на телефонах
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    buttons = ["USD", "EUR", "JPY", "TRY", "RUB", "AED"]
-    keyboard.add(*buttons)
-    await message.answer("Теперь выберите валюту, в которую хотите конвертировать:", reply_markup=keyboard)
+    # Создаем инлайн-клавиатуру для выбора целевой валюты
+    inline_kb = types.InlineKeyboardMarkup(row_width=3)
+    buttons = [
+        types.InlineKeyboardButton(text=cur, callback_data=f"to_currency:{cur}")
+        for cur in ["USD", "EUR", "JPY", "TRY", "RUB", "AED"]
+    ]
+    inline_kb.add(*buttons)
+    await message.answer("Теперь выберите валюту, в которую хотите конвертировать:", reply_markup=inline_kb)
 
-async def convert_currency(message: Message):
-    from_currency = user_data[message.from_user.id]["from_currency"]
-    to_currency = user_data[message.from_user.id]["to_currency"]
-    amount = user_data[message.from_user.id]["amount"]
+# ===== Обработчик callback-запросов инлайн-клавиатуры =====
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("to_currency:"))
+async def process_currency_callback(callback_query: types.CallbackQuery):
+    to_currency = callback_query.data.split(":", 1)[1]
+    user_id = callback_query.from_user.id
+
+    # Проверяем, что пользователь уже выбрал исходную валюту и ввёл сумму
+    if user_id not in user_data or "from_currency" not in user_data[user_id] or "amount" not in user_data[user_id]:
+        await bot.answer_callback_query(callback_query.id, "Сначала выберите исходную валюту и введите сумму!")
+        return
+
+    # Если выбрана та же валюта, что и исходная
+    if user_data[user_id].get("from_currency") == to_currency:
+        await bot.answer_callback_query(callback_query.id, "❌ Валюта для конвертации должна отличаться от исходной!")
+        return
+
+    user_data[user_id]["to_currency"] = to_currency
+    await bot.answer_callback_query(callback_query.id)
+    # После выбора целевой валюты выполняем конвертацию, передавая user_id
+    await convert_currency(user_id, callback_query.message)
+
+async def convert_currency(user_id: int, message: Message):
+    data = user_data.get(user_id)
+    if not data:
+        await message.reply("❌ Ошибка данных пользователя.", reply_markup=main_keyboard())
+        return
+
+    from_currency = data["from_currency"]
+    to_currency = data["to_currency"]
+    amount = data["amount"]
 
     rates = get_exchange_rates()
     if not rates:
@@ -146,7 +175,7 @@ async def convert_currency(message: Message):
     # Проверяем наличие курса для выбранной валюты (например, AED может отсутствовать)
     if rates.get(from_currency) is None or rates.get(to_currency) is None:
         await message.reply("❌ Не удалось получить курс для выбранной валюты.", reply_markup=main_keyboard())
-        user_data.pop(message.from_user.id, None)
+        user_data.pop(user_id, None)
         return
 
     result = (amount * rates[from_currency]) / rates[to_currency]
@@ -155,7 +184,7 @@ async def convert_currency(message: Message):
     else:
         result_str = f"{result:.2f}"
     await message.reply(f"💱 {amount} {from_currency} = {result_str} {to_currency}", reply_markup=main_keyboard())
-    user_data.pop(message.from_user.id, None)
+    user_data.pop(user_id, None)
 
 def get_exchange_rates():
     try:
