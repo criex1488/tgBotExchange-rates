@@ -7,13 +7,13 @@ from io import BytesIO
 import matplotlib.pyplot as plt
 import requests
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import Message, ReplyKeyboardMarkup
+from aiogram.types import Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.utils import executor
 from aiogram.dispatcher.middlewares import BaseMiddleware
 from aiogram.dispatcher.handler import CancelHandler
 
 # ===== Конфигурация =====
-API_TOKEN = "tgtoken"
+API_TOKEN = "tgotek"
 CBR_API_URL = "https://www.cbr-xml-daily.ru/daily_json.js"
 BANKI_API_URL = (
     "https://www.banki.ru/products/currencyNodejsApi/getBanksOrExchanges/"
@@ -46,13 +46,13 @@ dp.storage.data = {}
 dp.middleware.setup(ThrottlingMiddleware(limit=1))
 
 # ===== Глобальные переменные =====
-user_data = {}       # Для состояния конвертации
+user_data = {}       # Для хранения состояния конвертации
 subscribers = set()  # ID подписанных пользователей
 alerts = {}          # Будильники
 
 logging.basicConfig(level=logging.INFO)
 
-# ===== Главное меню =====
+# ===== Клавиатуры =====
 def main_keyboard():
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
     buttons = [
@@ -64,6 +64,12 @@ def main_keyboard():
     ]
     keyboard.add(*buttons)
     return keyboard
+
+def cancel_inline_keyboard():
+    """Инлайн-клавиатура с кнопкой 'Отмена' для отмены операции конвертации"""
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(text="Отмена", callback_data="cancel_conversion"))
+    return kb
 
 # ===== Приветствие (/start) =====
 @dp.message_handler(commands=["start"])
@@ -88,7 +94,7 @@ async def currency_selected(message: Message):
     user_id = message.from_user.id
     if user_id not in user_data:
         user_data[user_id] = {}
-    # Если уже введена сумма, проверяем, чтобы выбранная валюта не совпадала с исходной
+    # Если уже введена сумма – проверяем, чтобы выбранная валюта не совпадала с исходной
     if "amount" in user_data[user_id]:
         if user_data[user_id].get("from_currency") == message.text:
             await message.reply("❌ Валюта для конвертации должна отличаться от исходной. Выберите другую валюту:")
@@ -97,7 +103,10 @@ async def currency_selected(message: Message):
         await convert_currency(user_id, message)
     else:
         user_data[user_id]["from_currency"] = message.text
-        await message.reply(f"Вы выбрали {message.text}. Введите сумму для конвертации:")
+        # Сначала убираем reply‑клавиатуру
+        await message.answer(f"Вы выбрали {message.text}.", reply_markup=ReplyKeyboardRemove())
+        # Затем отправляем сообщение с инлайн‑кнопкой «Отмена»
+        await message.answer("Введите сумму для конвертации:", reply_markup=cancel_inline_keyboard())
 
 def is_number(text: str) -> bool:
     try:
@@ -110,17 +119,25 @@ def is_number(text: str) -> bool:
                     and "from_currency" in user_data[message.from_user.id] 
                     and "amount" not in user_data[message.from_user.id])
 async def amount_selected(message: Message):
+    # Если пользователь сам введёт "отмена" (в нижнем регистре) – сбрасываем состояние
+    if message.text.lower() == "отмена":
+        user_data.pop(message.from_user.id, None)
+        await message.reply("Операция отменена.", reply_markup=main_keyboard())
+        return
+
     t = message.text.replace(',', '.')
     try:
         float(t)
     except ValueError:
-        await message.reply("❌ Неверный формат суммы!", reply_markup=main_keyboard())
+        await message.reply("❌ Неверный формат суммы! Введите корректное число или нажмите 'Отмена'.",
+                            reply_markup=cancel_inline_keyboard())
         return
 
     if '.' in t:
         _, fraction = t.split('.', 1)
         if len(fraction) > 2:
-            await message.reply("❌ Слишком много цифр после десятичной точки. Максимум 2 цифры допустимо.", reply_markup=main_keyboard())
+            await message.reply("❌ Слишком много цифр после десятичной точки. Максимум 2 цифры допустимо.",
+                                reply_markup=cancel_inline_keyboard())
             return
 
     amount = float(t)
@@ -162,6 +179,13 @@ async def process_currency_callback(callback_query: types.CallbackQuery):
     user_data[user_id]["to_currency"] = to_currency
     await bot.answer_callback_query(callback_query.id)
     await convert_currency(user_id, callback_query.message)
+
+@dp.callback_query_handler(lambda c: c.data == "cancel_conversion")
+async def cancel_conversion_handler(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    user_data.pop(user_id, None)
+    await bot.answer_callback_query(callback_query.id, text="Операция отменена.")
+    await bot.send_message(user_id, "Операция отменена.", reply_markup=main_keyboard())
 
 async def convert_currency(user_id: int, message: Message):
     data = user_data.get(user_id)
@@ -236,7 +260,6 @@ def generate_currency_graph():
     if len(dates) < 2:
         raise Exception("Недостаточно данных для графика.")
 
-    # Для текстовой истории используем данные в хронологическом порядке (от старых к новым)
     hist_text = "История курса USD к RUB за последние 7 дней:\n" + "\n".join(
         f"{d}: {v:.2f}₽" for d, v in zip(dates[::-1], values[::-1])
     )
@@ -279,7 +302,6 @@ async def send_currency_graph(message: Message):
     async with lock:
         try:
             loop = asyncio.get_event_loop()
-            # Получаем и текстовую историю, и изображение графика
             hist_text, image_bytes = await loop.run_in_executor(None, generate_currency_graph)
         except Exception as e:
             logging.error(f"Ошибка генерации графика: {e}")
@@ -321,7 +343,6 @@ async def set_alert(message: Message):
                             reply_markup=main_keyboard())
         return
     try:
-        # Поддержка формата с оператором: /alert USD > 100.02 или /alert USD < 94.30
         if parts[2] in [">", "<"] and len(parts) >= 4:
             operator = parts[2]
             target_price = float(parts[3])
@@ -386,10 +407,6 @@ best_rates_cache = {
 CACHE_DURATION = 300  # 5 минут
 
 def get_best_exchange_rates(force_update: bool = False):
-    """
-    Если force_update==False, то если данные в кэше не устарели, возвращаем их.
-    Иначе выполняем HTTP-запрос к API banki.ru и обновляем кэш.
-    """
     global best_rates_cache
     current_time = time.time()
     if (not force_update and best_rates_cache["data"] is not None and
@@ -421,7 +438,6 @@ def get_best_exchange_rates(force_update: bool = False):
             buy = exchange.get("buy", 0)
             sale = exchange.get("sale", 0)
             refresh_date = exchange.get("refreshDate", "")
-            # Формирование ссылки: заменяем префикс, если требуется
             relative_url = bank.get("@id", "")
             if relative_url.startswith("/currency/api/v1/exchange_offices/"):
                 relative_url = relative_url.replace(
@@ -442,11 +458,6 @@ def get_best_exchange_rates(force_update: bool = False):
     return banks
 
 def generate_best_rates_text(banks):
-    """
-    Формирует отформатированное текстовое сообщение со списком лучших обменников.
-    Если банк присутствует несколько раз, объединяются адреса, при этом каждый адрес выводится на новой строке
-    и отображается как кликабельная ссылка (сам адрес является ссылкой).
-    """
     grouped = {}
     for bank in banks:
         bank_name, address, buy, sale, refresh_date, link = bank
@@ -464,14 +475,12 @@ def generate_best_rates_text(banks):
 
     lines = ["📊 *Лучшие обменники в Ижевске (выгодные для продажи USD):*\n"]
     for i, (bank_name, info) in enumerate(grouped.items(), start=1):
-        # Для каждого адреса создаём строку; если есть ссылка – сам адрес оборачиваем в Markdown‑ссылку
         address_lines = []
         for addr, link in info["addresses"]:
             if link:
                 address_lines.append(f"[{addr}]({link})")
             else:
                 address_lines.append(addr)
-        # Объединяем адреса, каждый с новой строки с отступом
         addresses_str = "\n    ".join(address_lines)
         lines.append(f"*{i}. {bank_name}*")
         lines.append(f"  📍 Адрес:\n    {addresses_str}")
@@ -481,9 +490,6 @@ def generate_best_rates_text(banks):
     return "\n".join(lines)
 
 async def best_rates_cache_refresher():
-    """
-    Фоновый таск, который каждые CACHE_DURATION секунд обновляет кэш данных лучших обменников.
-    """
     while True:
         loop = asyncio.get_event_loop()
         try:
@@ -533,7 +539,9 @@ async def daily_exchange_rates():
         await asyncio.sleep(86400)
         rates = get_exchange_rates()
         if subscribers and rates:
-            text = "📊 **Курсы валют на сегодня:**\n" + "\n".join(f"💰 {c}: {v:.2f} RUB" for c, v in rates.items() if v is not None)
+            text = "📊 **Курсы валют на сегодня:**\n" + "\n".join(
+                f"💰 {c}: {v:.2f} RUB" for c, v in rates.items() if v is not None
+            )
             for user_id in subscribers:
                 try:
                     await bot.send_message(user_id, text, parse_mode="Markdown", reply_markup=main_keyboard())
